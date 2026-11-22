@@ -25,6 +25,12 @@ function cssVar(name, fallback) {
   }
 }
 
+export function truncateLegendLabel(name, maxLen = 26) {
+  const s = String(name ?? "");
+  if (s.length <= maxLen) return s;
+  return `${s.slice(0, maxLen - 1)}…`;
+}
+
 function alignMultiRunSeries(seriesMap, runOrder) {
   const activeRuns = runOrder.filter(
     (rid) => seriesMap[rid] && seriesMap[rid].x && seriesMap[rid].x.length > 0
@@ -122,11 +128,13 @@ export function UPlotChart({
       },
     ];
 
+    const fullLabels = [seriesOpts[0].label];
     const useSmooth = smoothing > 0.01;
     const runMeta = new Map(runList.map((r, idx) => [r.id, { run: r, idx }]));
 
     for (const rid of activeRuns) {
       const meta = runMeta.get(rid) || { run: { name: rid }, idx: 0 };
+      const fullName = String(meta.run.name ?? rid);
       const color = SERIES_COLORS[meta.idx % SERIES_COLORS.length];
       let rawY = aligned[rid];
       if (logScale) {
@@ -135,8 +143,9 @@ export function UPlotChart({
 
       if (useSmooth) {
         data.push(rawY);
+        fullLabels.push(`${fullName} (raw)`);
         seriesOpts.push({
-          label: `${meta.run.name} (raw)`,
+          label: `${truncateLegendLabel(fullName, 20)} (raw)`,
           stroke: `${color}40`,
           width: 1,
           spanGaps: true,
@@ -146,8 +155,9 @@ export function UPlotChart({
 
         const emaY = computeEMA(rawY, smoothing);
         data.push(emaY);
+        fullLabels.push(fullName);
         seriesOpts.push({
-          label: meta.run.name,
+          label: truncateLegendLabel(fullName, 26),
           stroke: color,
           width: 2,
           spanGaps: true,
@@ -156,8 +166,9 @@ export function UPlotChart({
         });
       } else {
         data.push(rawY);
+        fullLabels.push(fullName);
         seriesOpts.push({
-          label: meta.run.name,
+          label: truncateLegendLabel(fullName, 26),
           stroke: color,
           width: 2,
           spanGaps: true,
@@ -169,7 +180,7 @@ export function UPlotChart({
 
     const textColor = cssVar("--muted", "#a19a8f");
     const gridColor = cssVar("--grid", "rgba(161, 154, 143, 0.13)");
-    const width = Math.max(260, container.clientWidth || 320);
+    const width = Math.max(200, container.clientWidth || 280);
 
     const opts = {
       width,
@@ -211,6 +222,16 @@ export function UPlotChart({
       ],
       series: seriesOpts,
       hooks: {
+        init: [
+          (u) => {
+            const ths = u.root.querySelectorAll(".u-legend tr.u-series th");
+            const offset = ths.length === fullLabels.length - 1 ? 1 : 0;
+            ths.forEach((th, idx) => {
+              const full = fullLabels[idx + offset];
+              if (full) th.setAttribute("title", full);
+            });
+          },
+        ],
         draw: [
           (u) => {
             if (xAxis !== "step" || nanSteps.length === 0) return;
@@ -274,7 +295,7 @@ export function UPlotChart({
         <div class="uplot-title mono" title=${title}>${title}</div>
       </div>
       ${hasData
-        ? html`<div ref=${wrapRef} style="width:100%;"></div>`
+        ? html`<div ref=${wrapRef} style="width:100%; min-width:0; overflow:hidden;"></div>`
         : html`<div class="muted" style="padding: 28px 0; text-align:center; font-size:12px;">
             No points yet
           </div>`}
@@ -283,42 +304,58 @@ export function UPlotChart({
 }
 
 export function Sparkline({ ys, color = "#e59838", height = 34 }) {
+  const wrapRef = useRef(null);
   const canvasRef = useRef(null);
 
   useEffect(() => {
+    const wrap = wrapRef.current;
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    const dpr = window.devicePixelRatio || 1;
-    const w = canvas.clientWidth || 100;
-    const h = height;
-    canvas.width = w * dpr;
-    canvas.height = h * dpr;
-    const ctx = canvas.getContext("2d");
-    ctx.scale(dpr, dpr);
-    ctx.clearRect(0, 0, w, h);
+    if (!wrap || !canvas) return;
 
-    const pts = (ys || []).filter((v) => v !== null && Number.isFinite(v));
-    if (pts.length < 2) return;
+    const draw = () => {
+      const dpr = window.devicePixelRatio || 1;
+      const w = Math.max(40, Math.floor(wrap.clientWidth || 120));
+      const h = height;
+      canvas.width = w * dpr;
+      canvas.height = h * dpr;
+      const ctx = canvas.getContext("2d");
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
 
-    const minV = Math.min(...pts);
-    const maxV = Math.max(...pts);
-    const span = maxV - minV || 1;
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 1.75;
-    ctx.beginPath();
-    pts.forEach((v, idx) => {
-      const px = (idx / (pts.length - 1)) * (w - 4) + 2;
-      const py = h - 3 - ((v - minV) / span) * (h - 6);
-      if (idx === 0) ctx.moveTo(px, py);
-      else ctx.lineTo(px, py);
-    });
-    ctx.stroke();
+      const pts = (ys || []).filter((v) => v !== null && Number.isFinite(v));
+      if (pts.length < 2) return;
+
+      const minV = Math.min(...pts);
+      const maxV = Math.max(...pts);
+      const span = maxV - minV || 1;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.75;
+      ctx.beginPath();
+      pts.forEach((v, idx) => {
+        const px = (idx / (pts.length - 1)) * (w - 4) + 2;
+        const py = h - 3 - ((v - minV) / span) * (h - 6);
+        if (idx === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      });
+      ctx.stroke();
+    };
+
+    draw();
+
+    if (typeof ResizeObserver === "function") {
+      const ro = new ResizeObserver(() => draw());
+      ro.observe(wrap);
+      return () => ro.disconnect();
+    }
+    return undefined;
   }, [ys, color, height]);
 
-  return html`<canvas
-    ref=${canvasRef}
-    style=${`width: 100%; height: ${height}px; display: block;`}
-  ></canvas>`;
+  return html`<div ref=${wrapRef} style="width: 100%; min-width: 0; overflow: hidden;">
+    <canvas
+      ref=${canvasRef}
+      style=${`width: 100%; max-width: 100%; height: ${height}px; display: block;`}
+    ></canvas>
+  </div>`;
 }
 
 export function HistogramChart({ snapshot }) {

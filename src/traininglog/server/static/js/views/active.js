@@ -121,7 +121,7 @@ export function ActiveView({ runs, onOpenRun, onOpenAlerts, onRefresh }) {
           return html`
             <div class="card" key=${run.id} style="cursor:pointer;" onClick=${() => onOpenRun(run.id)}>
               <div class="space-between" style="align-items:flex-start;">
-                <div style="min-width:0;">
+                <div style="flex:1; min-width:0;">
                   <div style="font-weight:700; font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
                     ${run.name}
                   </div>
@@ -134,7 +134,7 @@ export function ActiveView({ runs, onOpenRun, onOpenAlerts, onRefresh }) {
                     <span class="pill">${run.project_name}</span>
                   </div>
                 </div>
-                <div class="row" style="gap:4px;" onClick=${(e) => e.stopPropagation()}>
+                <div class="row" style="gap:4px; flex-shrink:0;" onClick=${(e) => e.stopPropagation()}>
                   ${run.open_anomaly_count > 0
                     ? html`<button
                         class="pill critical"
@@ -221,9 +221,9 @@ export function ActiveView({ runs, onOpenRun, onOpenAlerts, onRefresh }) {
                   const latest = sum[sm.key];
                   return html`
                     <div class="spark-box" key=${sm.key}>
-                      <div class="space-between" style="font-size:10px;">
-                        <span class="muted">${sm.label}</span>
-                        <span class="mono" style=${`color:${sm.color};font-weight:700;`}>
+                      <div class="space-between" style="font-size:10px; min-width:0; gap:6px;">
+                        <span class="muted" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${sm.label}</span>
+                        <span class="mono" style=${`color:${sm.color};font-weight:700;flex-shrink:0;`}>
                           ${latest != null
                             ? sm.pct
                               ? formatPct(latest)

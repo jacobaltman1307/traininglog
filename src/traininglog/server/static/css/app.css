@@ -94,6 +94,7 @@ textarea {
   display: flex;
   flex-direction: column;
   padding-bottom: calc(68px + env(safe-area-inset-bottom));
+  overflow-x: clip;
 }
 
 .topbar {
@@ -133,7 +134,9 @@ textarea {
   padding: 12px;
   max-width: 1480px;
   width: 100%;
+  min-width: 0;
   margin: 0 auto;
+  overflow-x: clip;
 }
 
 /* Mobile Bottom Nav */
@@ -261,11 +264,13 @@ textarea {
   border-radius: 12px;
   padding: 14px;
   box-shadow: var(--shadow);
+  min-width: 0;
+  max-width: 100%;
 }
 
 .grid-cards {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
 }
 
@@ -277,7 +282,7 @@ textarea {
 
 .chart-grid {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
 }
 
@@ -285,6 +290,24 @@ textarea {
   .chart-grid {
     grid-template-columns: repeat(auto-fit, minmax(430px, 1fr));
   }
+}
+
+.grid-2 {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+
+@media (min-width: 680px) {
+  .grid-2 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
 }
 
 /* Pills & Badges */
@@ -464,14 +487,16 @@ textarea {
 /* Stat mini grid */
 .stat-row {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
 }
 
 .stat-box {
   background: var(--surface-2);
   border-radius: 8px;
-  padding: 6px 8px;
+  padding: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .stat-label {
@@ -489,8 +514,8 @@ textarea {
 /* Sparklines row */
 .spark-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
   margin-top: 10px;
 }
 
@@ -499,6 +524,23 @@ textarea {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 6px 8px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+@media (min-width: 540px) {
+  .stat-row {
+    gap: 8px;
+  }
+
+  .stat-box {
+    padding: 6px 8px;
+  }
+
+  .spark-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
 }
 
 /* Tables */
@@ -597,6 +639,9 @@ tr.diff-row {
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 10px 12px 6px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .uplot-head {
@@ -620,11 +665,84 @@ tr.diff-row {
   font-family: inherit;
 }
 
-.uplot .u-legend {
+.uplot table.u-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  width: 100%;
+  max-width: 100%;
+  margin: 6px 0 2px;
+  padding: 0;
   font-size: 11px;
   color: var(--muted);
   text-align: left;
-  padding-top: 4px;
+  border-collapse: separate;
+}
+
+.uplot .u-legend tbody {
+  display: contents;
+}
+
+.uplot .u-legend tr.u-series {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin: 0;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.uplot .u-legend th,
+.uplot .u-legend td {
+  padding: 1px 0;
+  border: none;
+  background: transparent;
+  text-transform: none;
+  letter-spacing: normal;
+  position: static;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.uplot .u-legend th {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.uplot .u-legend .u-marker {
+  flex-shrink: 0;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  margin-right: 5px;
+}
+
+.uplot .u-legend .u-label {
+  display: inline-block;
+  max-width: 145px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+@media (min-width: 540px) {
+  .uplot .u-legend .u-label {
+    max-width: 210px;
+  }
+}
+
+.uplot .u-legend td.u-value {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  flex-shrink: 0;
+  padding-left: 2px;
 }
 
 .uplot .u-select {
@@ -649,6 +767,7 @@ tr.diff-row {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
 }
 
 .muted {
