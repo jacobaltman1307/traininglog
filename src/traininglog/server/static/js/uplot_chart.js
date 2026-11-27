@@ -114,7 +114,9 @@ export function UPlotChart({
               ? "Time"
               : xAxis === "turn"
                 ? "Turn"
-                : "Step",
+                : xAxis === "date"
+                  ? "Date"
+                  : "Step",
         value: (_, v) =>
           v == null
             ? "—"
@@ -122,9 +124,11 @@ export function UPlotChart({
               ? formatStep(v)
               : xAxis === "turn"
                 ? `T${Math.round(v)}`
-                : xAxis === "relative_time"
-                  ? formatDuration(v)
-                  : new Date(v * 1000).toLocaleTimeString(),
+                : xAxis === "date"
+                  ? new Date(v * 1000).toLocaleDateString()
+                  : xAxis === "relative_time"
+                    ? formatDuration(v)
+                    : new Date(v * 1000).toLocaleTimeString(),
       },
     ];
 
@@ -190,7 +194,7 @@ export function UPlotChart({
         drag: { x: true, y: false },
       },
       scales: {
-        x: { time: xAxis === "wall_time" },
+        x: { time: xAxis === "wall_time" || xAxis === "date" },
         y: { distr: logScale ? 3 : 1 },
       },
       axes: [
@@ -204,6 +208,12 @@ export function UPlotChart({
               if (v == null) return "";
               if (xAxis === "step") return formatStep(v);
               if (xAxis === "turn") return `T${Math.round(v)}`;
+              if (xAxis === "date") {
+                return new Date(v * 1000).toLocaleDateString([], {
+                  month: "short",
+                  day: "numeric",
+                });
+              }
               if (xAxis === "relative_time") return formatDuration(v);
               return new Date(v * 1000).toLocaleTimeString([], {
                 hour: "2-digit",

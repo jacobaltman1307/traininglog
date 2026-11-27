@@ -10,6 +10,8 @@ import { AlertsView } from "./views/alerts.js";
 import { CardsView } from "./views/cards.js";
 import { CompareView } from "./views/compare.js";
 import { LeagueView } from "./views/league.js";
+import { MetaCardView } from "./views/meta_card.js";
+import { MetaView } from "./views/meta.js";
 import { ReplaysView } from "./views/replays.js";
 import { RunDetailView } from "./views/run_detail.js";
 import { RunsView } from "./views/runs.js";
@@ -35,6 +37,23 @@ function parseHash() {
   }
   if (parts[0] === "league") {
     return { route: "league", runId: null, compareIds: [] };
+  }
+  if (parts[0] === "meta" && parts[1] === "card" && parts[2]) {
+    return {
+      route: "meta_card",
+      cardKey: decodeURIComponent(parts.slice(2).join("/")),
+      queryStr: queryPart || "",
+      runId: null,
+      compareIds: [],
+    };
+  }
+  if (parts[0] === "meta") {
+    return {
+      route: "meta",
+      queryStr: queryPart || "",
+      runId: null,
+      compareIds: [],
+    };
   }
   if (parts[0] === "replays") {
     return { route: "replays", runId: params.get("run_id") || null, compareIds: [] };
@@ -190,6 +209,12 @@ function App() {
             <span>League</span>
           </button>
           <button
+            class=${`side-btn ${loc.route === "meta" || loc.route === "meta_card" ? "active" : ""}`}
+            onClick=${() => navigate("#/meta")}
+          >
+            <span>Meta</span>
+          </button>
+          <button
             class=${`side-btn ${loc.route === "replays" ? "active" : ""}`}
             onClick=${() => navigate("#/replays")}
           >
@@ -295,6 +320,37 @@ function App() {
               />`
             : null}
 
+          ${loc.route === "meta"
+            ? html`<${MetaView}
+                projects=${projects}
+                theme=${theme}
+                queryStr=${loc.queryStr || ""}
+                onOpenCard=${(cardKey, qStr) =>
+                  navigate(
+                    `#/meta/card/${encodeURIComponent(cardKey)}${qStr ? `?${qStr}` : ""}`
+                  )}
+                onSyncQuery=${(qStr) => {
+                  const nextHash = `#/meta${qStr ? `?${qStr}` : ""}`;
+                  if (window.location.hash !== nextHash) {
+                    history.replaceState(null, "", nextHash);
+                  }
+                }}
+              />`
+            : null}
+
+          ${loc.route === "meta_card"
+            ? html`<${MetaCardView}
+                cardKey=${loc.cardKey}
+                queryStr=${loc.queryStr || ""}
+                theme=${theme}
+                onBack=${(qStr) => navigate(`#/meta${qStr ? `?${qStr}` : ""}`)}
+                onOpenCard=${(cardKey) =>
+                  navigate(
+                    `#/meta/card/${encodeURIComponent(cardKey)}${loc.queryStr ? `?${loc.queryStr}` : ""}`
+                  )}
+              />`
+            : null}
+
           ${loc.route === "replays"
             ? html`<${ReplaysView}
                 projects=${projects}
@@ -345,6 +401,12 @@ function App() {
           onClick=${() => navigate("#/league")}
         >
           <span>League</span>
+        </button>
+        <button
+          class=${`nav-btn ${loc.route === "meta" || loc.route === "meta_card" ? "active" : ""}`}
+          onClick=${() => navigate("#/meta")}
+        >
+          <span>Meta</span>
         </button>
         <button
           class=${`nav-btn ${loc.route === "replays" || loc.route === "cards" ? "active" : ""}`}

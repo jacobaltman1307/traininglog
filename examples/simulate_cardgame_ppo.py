@@ -255,6 +255,11 @@ def main() -> None:
         run_ids_by_arch=run_ids_by_arch,
         final_step=args.updates * args.step_delta,
     )
+    _simulate_meta_games(
+        server_url=args.url,
+        project=args.project,
+        run_ids_by_arch=run_ids_by_arch,
+    )
 
     print("Simulation complete!")
 
@@ -647,6 +652,270 @@ def _simulate_replays_and_cards(
                 step=st,
                 server_url=server_url,
             )
+
+
+def _simulate_meta_games(
+    *,
+    server_url: str,
+    project: str,
+    run_ids_by_arch: dict[str, str],
+) -> None:
+    """Populate versioned Card Catalogs and realistic per-game telemetry for the Meta tab."""
+    catalog_v1 = [
+        {"card_key": "Firebolt", "display_name": "Firebolt", "mana_cost": 2, "faction": "Dwarven", "card_type": "Spell", "rarity": "Common", "tags": ["burn", "removal"], "text": "Deal 4 damage to a lane unit."},
+        {"card_key": "Iron Shieldbearer", "display_name": "Iron Shieldbearer", "mana_cost": 2, "faction": "Dwarven", "card_type": "Unit", "rarity": "Common", "attack": 2, "health": 5, "tags": ["frontline", "armor"], "text": "Guard. Gains +2 HP on summon."},
+        {"card_key": "Rune Forge", "display_name": "Rune Forge", "mana_cost": 3, "faction": "Dwarven", "card_type": "Artifact", "rarity": "Rare", "tags": ["artifact", "buff"], "text": "Allied units in this lane gain +2/+2."},
+        {"card_key": "Anvil Golem", "display_name": "Anvil Golem", "mana_cost": 5, "faction": "Dwarven", "card_type": "Unit", "rarity": "Epic", "attack": 5, "health": 6, "tags": ["golem", "artifact_synergy"], "text": "Gains +2/+2 if an Artifact is in the same lane."},
+        {"card_key": "Dwarven Cannon", "display_name": "Dwarven Cannon", "mana_cost": 4, "faction": "Dwarven", "card_type": "Unit", "rarity": "Rare", "attack": 4, "health": 3, "tags": ["ranged"], "text": "Deals 2 splash damage on attack."},
+        {"card_key": "Mica Anvil Bringer", "display_name": "Mica, Anvil Bringer", "mana_cost": 6, "faction": "Dwarven", "card_type": "Unit", "rarity": "Legendary", "attack": 6, "health": 6, "tags": ["legendary", "artifact_synergy"], "text": "Summon a copy of your strongest Artifact."},
+        {"card_key": "Sky Valkyrie", "display_name": "Sky Valkyrie", "mana_cost": 3, "faction": "Heaven", "card_type": "Unit", "rarity": "Common", "attack": 3, "health": 3, "tags": ["flying", "tempo"], "text": "Swift. +1/+0 when placed on empty lane."},
+        {"card_key": "Light Cleric", "display_name": "Light Cleric", "mana_cost": 2, "faction": "Heaven", "card_type": "Unit", "rarity": "Common", "attack": 1, "health": 3, "tags": ["healer"], "text": "Restore 2 HP to adjacent ally."},
+        {"card_key": "Storm Caller", "display_name": "Storm Caller", "mana_cost": 4, "faction": "Heaven", "card_type": "Unit", "rarity": "Rare", "attack": 3, "health": 4, "tags": ["spell_power"], "text": "Deal 1 damage to enemy lane on play."},
+        {"card_key": "Astos Blade Unending", "display_name": "Astos, Blade Unending", "mana_cost": 5, "faction": "Heaven", "card_type": "Unit", "rarity": "Legendary", "attack": 5, "health": 4, "tags": ["legendary", "aggro"], "text": "Returns to hand on death once."},
+        {"card_key": "Scoria The Deadshot", "display_name": "Scoria, The Deadshot", "mana_cost": 4, "faction": "Neutral", "card_type": "Unit", "rarity": "Epic", "attack": 4, "health": 3, "tags": ["sniper"], "text": "Bonus +3 damage if placed on flank lane L3."},
+        {"card_key": "Drop The Hammer", "display_name": "Drop The Hammer", "mana_cost": 5, "faction": "Neutral", "card_type": "Spell", "rarity": "Rare", "tags": ["global", "board_clear"], "text": "Deal 3 damage to all enemy units across all lanes."},
+    ]
+    catalog_v2 = [dict(c) for c in catalog_v1]
+    for c in catalog_v2:
+        if c["card_key"] == "Firebolt":
+            c["mana_cost"] = 3
+            c["text"] = "Deal 3 damage to a lane unit. (Nerfed from 2 mana / 4 dmg)"
+        elif c["card_key"] == "Light Cleric":
+            c["attack"] = 2
+            c["health"] = 4
+            c["text"] = "Restore 3 HP to adjacent ally. (Buffed)"
+
+    tl.log_card_catalog(
+        catalog_v1,
+        project=project,
+        manifest_hash="c4f8a91e",
+        patch_label="v0.9 Pre-Nerf",
+        notes="Initial self-play balance snapshot",
+        server_url=server_url,
+    )
+    tl.log_card_catalog(
+        catalog_v2,
+        project=project,
+        manifest_hash="d7a2b50f",
+        patch_label="v1.0 Balance Patch",
+        notes="Firebolt nerf & Light Cleric buff",
+        server_url=server_url,
+    )
+
+    rng = random.Random(4242)
+    now_ms = int(time.time() * 1000)
+    day_ms = 86_400_000
+
+    agents = [
+        ("DualStream_v2_Best", "ai", 1840.0),
+        ("Transformer_550M", "ai", 1710.0),
+        ("DualStream_v1", "ai", 1620.0),
+        ("MlpBaseline_400M", "ai", 1490.0),
+    ]
+    decks = {
+        "Starter_Dwarven": ["Firebolt", "Iron Shieldbearer", "Rune Forge", "Anvil Golem", "Dwarven Cannon", "Mica Anvil Bringer", "Scoria The Deadshot", "Drop The Hammer"],
+        "Starter_Heaven": ["Firebolt", "Sky Valkyrie", "Light Cleric", "Storm Caller", "Astos Blade Unending", "Iron Shieldbearer", "Scoria The Deadshot", "Drop The Hammer"],
+    }
+
+    def card_power(ckey: str, mhash: str) -> float:
+        base = {
+            "Firebolt": 0.34 if mhash == "c4f8a91e" else 0.08,
+            "Iron Shieldbearer": 0.14,
+            "Rune Forge": 0.16,
+            "Anvil Golem": 0.12,
+            "Dwarven Cannon": -0.10,
+            "Mica Anvil Bringer": 0.22,
+            "Sky Valkyrie": 0.18,
+            "Light Cleric": -0.18 if mhash == "c4f8a91e" else 0.16,
+            "Storm Caller": 0.05,
+            "Astos Blade Unending": 0.24,
+            "Scoria The Deadshot": 0.08,
+            "Drop The Hammer": 0.20,
+        }
+        return base.get(ckey, 0.0)
+
+    def simulate_game(
+        idx: int,
+        *,
+        source: str,
+        mhash: str,
+        p0_spec: tuple[str, str, float, str | None],
+        p1_spec: tuple[str, str, float, str | None],
+        day_offset: int,
+    ) -> dict:
+        played_at = now_ms - day_offset * day_ms + rng.randint(0, 3600_000)
+        rounds = rng.randint(5, 9)
+        player_payloads = []
+        strengths = []
+        drawn_sets = []
+
+        for seat, (pkey, atype, rating, tier) in enumerate((p0_spec, p1_spec)):
+            dname = "Starter_Dwarven" if (idx + seat) % 2 == 0 else "Starter_Heaven"
+            pool = list(decks[dname])
+            deck_dict = {c: (3 if c in ("Firebolt", "Iron Shieldbearer", "Sky Valkyrie") else 2) for c in pool}
+            drawn_cards = rng.sample(pool, k=rng.randint(4, 6))
+            oh_cards = drawn_cards[:2]
+            drawn_sets.append(set(drawn_cards))
+
+            plays = []
+            draw_wpas = {}
+            strength = (rating - 1600.0) / 350.0 + (0.08 if seat == 0 else -0.08)
+            played_cards = rng.sample(drawn_cards, k=max(2, len(drawn_cards) - 1))
+            played_set = set(played_cards)
+
+            # Planted Rune Forge + Anvil Golem same-lane combo
+            combo_lane = 1 if ("Rune Forge" in played_set and "Anvil Golem" in played_set and rng.random() < 0.72) else None
+            if combo_lane is not None:
+                strength += 0.55
+
+            cur_prob = 0.50 + (0.03 if seat == 0 else -0.03)
+            for p_i, ckey in enumerate(played_cards):
+                turn = min(rounds, 1 + p_i + rng.randint(0, 2))
+                if ckey == "Drop The Hammer":
+                    lane = None
+                    lctx = None
+                elif combo_lane is not None and ckey in ("Rune Forge", "Anvil Golem"):
+                    lane = combo_lane
+                    lctx = "allied" if ckey == "Anvil Golem" else "empty"
+                elif ckey == "Scoria The Deadshot":
+                    # Played most often in L0 (misplay), but much stronger in L3
+                    lane = rng.choices([0, 1, 2, 3], weights=[0.52, 0.16, 0.12, 0.20])[0]
+                    lctx = "opposed" if lane == 3 else "empty"
+                    if lane == 3:
+                        strength += 0.45
+                    elif lane == 0:
+                        strength -= 0.18
+                elif ckey == "Iron Shieldbearer":
+                    lane = rng.choices([0, 1, 2, 3], weights=[0.12, 0.45, 0.33, 0.10])[0]
+                    lctx = "opposed" if rng.random() < 0.65 else "empty"
+                else:
+                    lane = rng.randint(0, 3)
+                    lctx = rng.choice(["empty", "opposed", "allied"])
+
+                delta = card_power(ckey, mhash) * 0.12 + rng.uniform(-0.02, 0.03)
+                next_prob = max(0.03, min(0.97, cur_prob + delta))
+                plays.append(
+                    {
+                        "card": ckey,
+                        "turn": turn,
+                        "lane": lane,
+                        "lane_context": lctx,
+                        "win_prob_before": round(cur_prob, 4),
+                        "win_prob_after": round(next_prob, 4),
+                    }
+                )
+                cur_prob = next_prob
+                strength += card_power(ckey, mhash)
+
+            for ckey in drawn_cards:
+                draw_wpas[ckey] = [round(card_power(ckey, mhash) * 0.08 + rng.uniform(-0.01, 0.015), 4)]
+                if ckey not in played_set:
+                    strength += card_power(ckey, mhash) * 0.35
+
+            strengths.append(strength)
+            player_payloads.append(
+                {
+                    "seat": seat,
+                    "player_key": pkey,
+                    "actor_type": atype,
+                    "rating": rating,
+                    "rating_system": "glicko2",
+                    "tier": tier,
+                    "deck_name": dname,
+                    "deck": deck_dict,
+                    "opening_hand": oh_cards,
+                    "drawn": {c: 1 for c in drawn_cards},
+                    "draw_wpas": draw_wpas,
+                    "plays": plays,
+                }
+            )
+
+        # Planted opponent counter: Iron Shieldbearer counters Sky Valkyrie
+        if "Iron Shieldbearer" in drawn_sets[0] and "Sky Valkyrie" in drawn_sets[1]:
+            strengths[0] += 0.42
+        if "Iron Shieldbearer" in drawn_sets[1] and "Sky Valkyrie" in drawn_sets[0]:
+            strengths[1] += 0.42
+
+        diff = max(-10.0, min(10.0, strengths[0] - strengths[1]))
+        p0_win_prob = 1.0 / (1.0 + math.exp(-diff))
+        p0_won = rng.random() < p0_win_prob
+        player_payloads[0]["rank"] = 1 if p0_won else 2
+        player_payloads[0]["outcome_score"] = 1.0 if p0_won else 0.0
+        player_payloads[1]["rank"] = 2 if p0_won else 1
+        player_payloads[1]["outcome_score"] = 0.0 if p0_won else 1.0
+
+        return {
+            "source_key": f"sim_meta:{source}:{mhash}:{idx}",
+            "source": source,
+            "mode": "1v1",
+            "manifest_hash": mhash,
+            "rounds": rounds,
+            "played_at": played_at,
+            "critic_model": "DualStream_v2_Best",
+            "critic_perspective": "reference_public",
+            "players": player_payloads,
+        }
+
+    games = []
+    # 180 v1 league games + 220 v2 league games across 5 days
+    for i in range(180):
+        a0, a1 = rng.sample(agents, 2)
+        games.append(
+            simulate_game(
+                i,
+                source="league",
+                mhash="c4f8a91e",
+                p0_spec=(a0[0], a0[1], a0[2], None),
+                p1_spec=(a1[0], a1[1], a1[2], None),
+                day_offset=4 - (i // 90),
+            )
+        )
+    for i in range(220):
+        a0, a1 = rng.sample(agents, 2)
+        games.append(
+            simulate_game(
+                1000 + i,
+                source="league",
+                mhash="d7a2b50f",
+                p0_spec=(a0[0], a0[1], a0[2], None),
+                p1_spec=(a1[0], a1[1], a1[2], None),
+                day_offset=2 - min(2, i // 75),
+            )
+        )
+    # 30 bot games (excluded by default)
+    for i in range(30):
+        a0 = agents[0]
+        games.append(
+            simulate_game(
+                2000 + i,
+                source="league",
+                mhash="d7a2b50f",
+                p0_spec=(a0[0], a0[1], a0[2], None),
+                p1_spec=("Random_Bot", "bot", 1120.0, None),
+                day_offset=0,
+            )
+        )
+    # 40 human player_ranked sample games
+    for i in range(40):
+        tier = "Diamond" if i % 2 == 0 else "Gold"
+        r = 1920.0 if tier == "Diamond" else 1560.0
+        games.append(
+            simulate_game(
+                3000 + i,
+                source="player_ranked",
+                mhash="d7a2b50f",
+                p0_spec=(f"player_{i % 6}", "human", r + rng.uniform(-40, 40), tier),
+                p1_spec=(f"player_{(i + 3) % 6}", "human", r + rng.uniform(-40, 40), tier),
+                day_offset=i % 3,
+            )
+        )
+
+    tl.log_meta_games(
+        games,
+        project=project,
+        run_id=run_ids_by_arch.get("dual_stream"),
+        server_url=server_url,
+    )
 
 
 if __name__ == "__main__":

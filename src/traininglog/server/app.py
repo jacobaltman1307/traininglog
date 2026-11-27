@@ -20,12 +20,14 @@ from .anomalies import AnomalyDetector
 from .blobs import BlobStore
 from .config import ServerConfig
 from .db import Database
+from .meta import MetaAnalyticsEngine
 from .routes import alerts as alerts_routes
 from .routes import analytics as analytics_routes
 from .routes import checkpoints as checkpoints_routes
 from .routes import commands as commands_routes
 from .routes import ingest as ingest_routes
 from .routes import league as league_routes
+from .routes import meta as meta_routes
 from .routes import plasticity as plasticity_routes
 from .routes import replays as replays_routes
 from .routes import runs as runs_routes
@@ -59,6 +61,7 @@ def create_app(
         app.state.event_bus = event_bus
         app.state.alert_dispatcher = alert_dispatcher
         app.state.anomaly_detector = anomaly_detector
+        app.state.meta_engine = MetaAnalyticsEngine(db)
 
         stop_event = asyncio.Event()
 
@@ -154,6 +157,7 @@ def create_app(
     app.include_router(plasticity_routes.router)
     app.include_router(replays_routes.router)
     app.include_router(analytics_routes.router)
+    app.include_router(meta_routes.router)
 
     if STATIC_DIR.exists():
         app.mount(

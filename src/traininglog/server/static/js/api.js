@@ -107,6 +107,7 @@ export function connectSSE(onEvent, { runId = null, onStatus = null } = {}) {
       "plasticity_recorded",
       "replay_recorded",
       "cards_updated",
+      "meta_updated",
     ]) {
       es.addEventListener(type, handleFrame);
     }
@@ -155,6 +156,13 @@ export function formatPct(val) {
   if (val === null || val === undefined || !Number.isFinite(val)) return "—";
   const pct = val <= 1.0 && val >= 0.0 ? val * 100 : val;
   return `${pct.toFixed(1)}%`;
+}
+
+export function formatSignedPct(val, decimals = 1) {
+  if (val === null || val === undefined || !Number.isFinite(val)) return "—";
+  const pct = val * 100;
+  const sign = pct > 0 ? "+" : "";
+  return `${sign}${pct.toFixed(decimals)}%`;
 }
 
 export function formatDuration(seconds) {

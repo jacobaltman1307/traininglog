@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import gzip
 import json
+import math
 import sqlite3
 import threading
 import time
@@ -415,6 +417,136 @@ class Database:
                         ON card_stats(project_id, card_name, step);
                     CREATE INDEX IF NOT EXISTS idx_dist_run_name_step
                         ON distributions(run_id, name, step);
+
+                    CREATE TABLE IF NOT EXISTS meta_cards (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                        card_key TEXT NOT NULL,
+                        UNIQUE(project_id, card_key)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS meta_manifests (
+                        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                        manifest_hash TEXT NOT NULL,
+                        patch_label TEXT NOT NULL DEFAULT '',
+                        notes TEXT NOT NULL DEFAULT '',
+                        num_lanes INTEGER NOT NULL DEFAULT 4,
+                        first_seen_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        PRIMARY KEY (project_id, manifest_hash)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS meta_card_catalog (
+                        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                        manifest_hash TEXT NOT NULL,
+                        card_id INTEGER NOT NULL REFERENCES meta_cards(id) ON DELETE CASCADE,
+                        display_name TEXT NOT NULL,
+                        mana_cost INTEGER,
+                        faction TEXT,
+                        card_type TEXT,
+                        rarity TEXT,
+                        attack INTEGER,
+                        health INTEGER,
+                        tags_json TEXT NOT NULL DEFAULT '[]',
+                        text TEXT NOT NULL DEFAULT '',
+                        extra_json TEXT NOT NULL DEFAULT '{}',
+                        PRIMARY KEY (project_id, manifest_hash, card_id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS meta_games (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                        source_key TEXT,
+                        source TEXT NOT NULL DEFAULT 'league',
+                        mode TEXT NOT NULL DEFAULT '1v1',
+                        match_id TEXT REFERENCES matches(id) ON DELETE SET NULL,
+                        run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+                        replay_id TEXT REFERENCES replays(id) ON DELETE SET NULL,
+                        manifest_hash TEXT NOT NULL DEFAULT '',
+                        num_players INTEGER NOT NULL DEFAULT 2,
+                        num_lanes INTEGER NOT NULL DEFAULT 4,
+                        rounds INTEGER NOT NULL DEFAULT 0,
+                        total_actions INTEGER NOT NULL DEFAULT 0,
+                        duration_sec REAL,
+                        critic_model TEXT,
+                        critic_perspective TEXT,
+                        played_at INTEGER NOT NULL,
+                        day_bucket INTEGER NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS meta_game_players (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        game_id INTEGER NOT NULL REFERENCES meta_games(id) ON DELETE CASCADE,
+                        seat INTEGER NOT NULL,
+                        player_key TEXT NOT NULL,
+                        actor_type TEXT NOT NULL DEFAULT 'ai',
+                        rating REAL,
+                        rating_system TEXT,
+                        tier TEXT,
+                        deck_name TEXT,
+                        deck_hash TEXT,
+                        rank INTEGER NOT NULL DEFAULT 1,
+                        outcome_score REAL NOT NULL,
+                        UNIQUE(game_id, seat)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS meta_game_cards (
+                        game_player_id INTEGER NOT NULL REFERENCES meta_game_players(id) ON DELETE CASCADE,
+                        card_id INTEGER NOT NULL REFERENCES meta_cards(id),
+                        copies_in_deck INTEGER NOT NULL DEFAULT 1,
+                        in_opening_hand INTEGER NOT NULL DEFAULT 0,
+                        mulligan_offered INTEGER NOT NULL DEFAULT 0,
+                        mulligan_kept INTEGER NOT NULL DEFAULT 0,
+                        drawn_count INTEGER NOT NULL DEFAULT 0,
+                        played_count INTEGER NOT NULL DEFAULT 0,
+                        first_turn_played INTEGER,
+                        lane_mask INTEGER NOT NULL DEFAULT 0,
+                        critic_play_wpa_sum REAL,
+                        critic_play_wpa_count INTEGER NOT NULL DEFAULT 0,
+                        critic_draw_wpa_sum REAL,
+                        critic_draw_wpa_count INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY (game_player_id, card_id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS meta_card_plays (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        game_player_id INTEGER NOT NULL REFERENCES meta_game_players(id) ON DELETE CASCADE,
+                        card_id INTEGER NOT NULL REFERENCES meta_cards(id),
+                        turn INTEGER NOT NULL,
+                        lane INTEGER,
+                        lane_context TEXT,
+                        win_prob_before REAL,
+                        win_prob_after REAL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS meta_watermarks (
+                        project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+                        version INTEGER NOT NULL DEFAULT 0,
+                        updated_at INTEGER NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS meta_cache (
+                        cache_key TEXT PRIMARY KEY,
+                        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                        watermark INTEGER NOT NULL,
+                        payload_gz BLOB NOT NULL,
+                        computed_at INTEGER NOT NULL
+                    );
+
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_meta_games_proj_src_key
+                        ON meta_games(project_id, source_key) WHERE source_key IS NOT NULL;
+                    CREATE INDEX IF NOT EXISTS idx_meta_games_filter
+                        ON meta_games(project_id, source, manifest_hash, mode, played_at);
+                    CREATE INDEX IF NOT EXISTS idx_meta_games_day
+                        ON meta_games(project_id, source, manifest_hash, day_bucket);
+                    CREATE INDEX IF NOT EXISTS idx_meta_gp_game_actor
+                        ON meta_game_players(game_id, actor_type, rating, tier);
+                    CREATE INDEX IF NOT EXISTS idx_meta_gc_card
+                        ON meta_game_cards(card_id, game_player_id);
+                    CREATE INDEX IF NOT EXISTS idx_meta_cp_card_lane
+                        ON meta_card_plays(card_id, lane, turn);
+                    CREATE INDEX IF NOT EXISTS idx_meta_cp_gp
+                        ON meta_card_plays(game_player_id);
                     """
                 )
 
@@ -3417,3 +3549,724 @@ class Database:
             dedup_idxs = list(dict.fromkeys(idxs))
             points = [points[i] for i in dedup_idxs]
         return points
+
+    # ------------------------------------------------------------------
+    # Card Meta Telemetry, Versioned Catalog & Snapshot Cache
+    # ------------------------------------------------------------------
+
+    def resolve_project_id(self, project: str | None) -> str | None:
+        with self._lock:
+            if project:
+                row = self._conn.execute(
+                    "SELECT id FROM projects WHERE name = ? OR id = ? LIMIT 1",
+                    (project, project),
+                ).fetchone()
+                return str(row["id"]) if row else None
+            row = self._conn.execute(
+                """
+                SELECT project_id, COUNT(*) AS n
+                FROM meta_games
+                GROUP BY project_id
+                ORDER BY n DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            if row is not None:
+                return str(row["project_id"])
+            row2 = self._conn.execute(
+                "SELECT id FROM projects ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+            return str(row2["id"]) if row2 else None
+
+    def _bump_meta_watermark_locked(self, project_id: str) -> int:
+        ts = now_ms()
+        self._conn.execute(
+            """
+            INSERT INTO meta_watermarks (project_id, version, updated_at)
+            VALUES (?, 1, ?)
+            ON CONFLICT(project_id) DO UPDATE SET
+                version = meta_watermarks.version + 1,
+                updated_at = excluded.updated_at
+            """,
+            (project_id, ts),
+        )
+        self._conn.execute(
+            "DELETE FROM meta_cache WHERE project_id = ?", (project_id,)
+        )
+        row = self._conn.execute(
+            "SELECT version FROM meta_watermarks WHERE project_id = ?", (project_id,)
+        ).fetchone()
+        return int(row["version"]) if row else 1
+
+    def get_meta_watermark(self, project_id: str | None) -> int:
+        with self._lock:
+            if project_id:
+                row = self._conn.execute(
+                    "SELECT version FROM meta_watermarks WHERE project_id = ?",
+                    (project_id,),
+                ).fetchone()
+                return int(row["version"]) if row else 0
+            row = self._conn.execute(
+                "SELECT COALESCE(SUM(version), 0) AS v FROM meta_watermarks"
+            ).fetchone()
+            return int(row["v"]) if row else 0
+
+    def get_meta_cache(self, cache_key: str, watermark: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT watermark, payload_gz FROM meta_cache WHERE cache_key = ?",
+                (cache_key,),
+            ).fetchone()
+            if row is None or int(row["watermark"]) != int(watermark):
+                return None
+            raw = gzip.decompress(bytes(row["payload_gz"])).decode("utf-8")
+            return json.loads(raw)
+
+    def set_meta_cache(
+        self,
+        cache_key: str,
+        project_id: str | None,
+        watermark: int,
+        payload: dict[str, Any],
+    ) -> None:
+        if not project_id:
+            return
+        gz = gzip.compress(
+            _json_dumps(sanitize_json_value(payload)).encode("utf-8")
+        )
+        ts = now_ms()
+        with self._lock:
+            with self._conn:
+                self._conn.execute(
+                    """
+                    INSERT INTO meta_cache (cache_key, project_id, watermark, payload_gz, computed_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(cache_key) DO UPDATE SET
+                        project_id = excluded.project_id,
+                        watermark = excluded.watermark,
+                        payload_gz = excluded.payload_gz,
+                        computed_at = excluded.computed_at
+                    """,
+                    (cache_key, project_id, int(watermark), gz, ts),
+                )
+
+    def _ensure_meta_cards_locked(
+        self, project_id: str, card_keys: set[str] | list[str]
+    ) -> dict[str, int]:
+        clean = sorted({str(k).strip() for k in card_keys if str(k).strip()})
+        if not clean:
+            return {}
+        rows = self._conn.execute(
+            "SELECT id, card_key FROM meta_cards WHERE project_id = ?",
+            (project_id,),
+        ).fetchall()
+        mapping = {str(r["card_key"]): int(r["id"]) for r in rows}
+        missing = [k for k in clean if k not in mapping]
+        if missing:
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO meta_cards (project_id, card_key) VALUES (?, ?)",
+                [(project_id, k) for k in missing],
+            )
+            rows = self._conn.execute(
+                "SELECT id, card_key FROM meta_cards WHERE project_id = ?",
+                (project_id,),
+            ).fetchall()
+            mapping = {str(r["card_key"]): int(r["id"]) for r in rows}
+        return mapping
+
+    def _upsert_manifest_locked(
+        self,
+        project_id: str,
+        manifest_hash: str,
+        *,
+        patch_label: str = "",
+        notes: str = "",
+        num_lanes: int = 4,
+        ts: int,
+    ) -> None:
+        mhash = str(manifest_hash or "")
+        existing = self._conn.execute(
+            "SELECT patch_label, notes, num_lanes FROM meta_manifests WHERE project_id = ? AND manifest_hash = ?",
+            (project_id, mhash),
+        ).fetchone()
+        if existing is None:
+            self._conn.execute(
+                """
+                INSERT INTO meta_manifests (
+                    project_id, manifest_hash, patch_label, notes, num_lanes, first_seen_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (project_id, mhash, patch_label, notes, max(1, int(num_lanes)), ts, ts),
+            )
+        else:
+            eff_label = patch_label or str(existing["patch_label"] or "")
+            eff_notes = notes or str(existing["notes"] or "")
+            eff_lanes = max(1, int(num_lanes or existing["num_lanes"] or 4))
+            self._conn.execute(
+                """
+                UPDATE meta_manifests
+                SET patch_label = ?, notes = ?, num_lanes = ?, updated_at = ?
+                WHERE project_id = ? AND manifest_hash = ?
+                """,
+                (eff_label, eff_notes, eff_lanes, ts, project_id, mhash),
+            )
+
+    def upsert_card_catalog(
+        self,
+        *,
+        project: str,
+        manifest_hash: str,
+        cards: list[dict[str, Any]],
+        patch_label: str = "",
+        notes: str = "",
+        num_lanes: int = 4,
+    ) -> dict[str, Any]:
+        proj = self.ensure_project(project or "default")
+        project_id = proj["id"]
+        mhash = str(manifest_hash or "")
+        ts = now_ms()
+        keys = [
+            str(c.get("card_key") or c.get("card_name") or c.get("name") or "").strip()
+            for c in cards
+        ]
+        with self._lock:
+            with self._conn:
+                self._upsert_manifest_locked(
+                    project_id,
+                    mhash,
+                    patch_label=patch_label,
+                    notes=notes,
+                    num_lanes=num_lanes,
+                    ts=ts,
+                )
+                card_map = self._ensure_meta_cards_locked(project_id, keys)
+                upserted = 0
+                for item in cards:
+                    ckey = str(
+                        item.get("card_key")
+                        or item.get("card_name")
+                        or item.get("name")
+                        or ""
+                    ).strip()
+                    if not ckey or ckey not in card_map:
+                        continue
+                    cid = card_map[ckey]
+                    display_name = str(item.get("display_name") or item.get("name") or ckey)
+                    mana_cost = item.get("mana_cost", item.get("cost"))
+                    attack = item.get("attack", item.get("atk"))
+                    health = item.get("health", item.get("hp"))
+                    tags = [str(t) for t in (item.get("tags") or []) if t]
+                    extra = sanitize_json_value(item.get("extra") or {})
+                    self._conn.execute(
+                        """
+                        INSERT INTO meta_card_catalog (
+                            project_id, manifest_hash, card_id, display_name,
+                            mana_cost, faction, card_type, rarity, attack, health,
+                            tags_json, text, extra_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(project_id, manifest_hash, card_id) DO UPDATE SET
+                            display_name = excluded.display_name,
+                            mana_cost = excluded.mana_cost,
+                            faction = excluded.faction,
+                            card_type = excluded.card_type,
+                            rarity = excluded.rarity,
+                            attack = excluded.attack,
+                            health = excluded.health,
+                            tags_json = excluded.tags_json,
+                            text = excluded.text,
+                            extra_json = excluded.extra_json
+                        """,
+                        (
+                            project_id,
+                            mhash,
+                            cid,
+                            display_name,
+                            int(mana_cost) if mana_cost is not None else None,
+                            str(item["faction"]) if item.get("faction") else None,
+                            str(item["card_type"]) if item.get("card_type") else None,
+                            str(item["rarity"]) if item.get("rarity") else None,
+                            int(attack) if attack is not None else None,
+                            int(health) if health is not None else None,
+                            _json_dumps(tags),
+                            str(item.get("text") or ""),
+                            _json_dumps(extra),
+                        ),
+                    )
+                    upserted += 1
+                watermark = self._bump_meta_watermark_locked(project_id)
+        return {
+            "project": proj["name"],
+            "project_id": project_id,
+            "manifest_hash": mhash,
+            "patch_label": patch_label,
+            "upserted": upserted,
+            "watermark": watermark,
+        }
+
+    @staticmethod
+    def _normalize_win_prob(val: Any, *, value_scale: str, is_raw_value: bool) -> float | None:
+        if val is None or isinstance(val, bool):
+            return None
+        try:
+            f = float(val)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(f):
+            return None
+        if is_raw_value or value_scale == "neg1_pos1":
+            f = (f + 1.0) * 0.5
+        return max(0.0, min(1.0, f))
+
+    @staticmethod
+    def _coerce_card_counts(raw: Any) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        if isinstance(raw, dict):
+            for k, v in raw.items():
+                ckey = str(k).strip()
+                if not ckey:
+                    continue
+                n = int(v or 0)
+                if n > 0:
+                    counts[ckey] = counts.get(ckey, 0) + n
+        elif isinstance(raw, (list, tuple, set)):
+            for k in raw:
+                ckey = str(k).strip()
+                if ckey:
+                    counts[ckey] = counts.get(ckey, 0) + 1
+        return counts
+
+    def insert_meta_games_batch(
+        self,
+        *,
+        project: str,
+        games: list[dict[str, Any]],
+        default_source: str = "league",
+        default_manifest_hash: str = "",
+        default_match_id: str | None = None,
+        default_run_id: str | None = None,
+        value_scale: str = "prob",
+    ) -> dict[str, Any]:
+        proj = self.ensure_project(project or "default")
+        project_id = proj["id"]
+        ts_now = now_ms()
+
+        # Collect all referenced card keys across the entire batch upfront.
+        all_card_keys: set[str] = set()
+        match_ids: set[str] = set()
+        run_ids: set[str] = set()
+        replay_ids: set[str] = set()
+        source_keys: list[str] = []
+
+        for g in games:
+            if not isinstance(g, dict):
+                continue
+            sk = g.get("source_key")
+            if sk:
+                source_keys.append(str(sk))
+            mid = g.get("match_id") or default_match_id
+            if mid:
+                match_ids.add(str(mid))
+            rid = g.get("run_id") or default_run_id
+            if rid:
+                run_ids.add(str(rid))
+            rpl = g.get("replay_id")
+            if rpl:
+                replay_ids.add(str(rpl))
+            for p in g.get("players") or []:
+                if not isinstance(p, dict):
+                    continue
+                for field in ("deck", "opening_hand", "mulligan_offered", "mulligan_kept", "drawn"):
+                    raw_val = p.get(field)
+                    if isinstance(raw_val, dict):
+                        all_card_keys.update(str(k).strip() for k in raw_val.keys())
+                    elif isinstance(raw_val, (list, tuple, set)):
+                        all_card_keys.update(str(k).strip() for k in raw_val)
+                draw_wpas = p.get("draw_wpas")
+                if isinstance(draw_wpas, dict):
+                    all_card_keys.update(str(k).strip() for k in draw_wpas.keys())
+                for play in p.get("plays") or []:
+                    if isinstance(play, dict):
+                        ck = play.get("card") or play.get("card_key") or play.get("card_name")
+                        if ck:
+                            all_card_keys.add(str(ck).strip())
+
+        inserted = 0
+        duplicates = 0
+        total_plays = 0
+
+        with self._lock:
+            with self._conn:
+                card_map = self._ensure_meta_cards_locked(project_id, all_card_keys)
+
+                valid_matches = {
+                    str(r["id"])
+                    for r in (
+                        self._conn.execute(
+                            f"SELECT id FROM matches WHERE id IN ({','.join('?' for _ in match_ids)})",
+                            tuple(match_ids),
+                        ).fetchall()
+                        if match_ids
+                        else []
+                    )
+                }
+                valid_runs = {
+                    str(r["id"])
+                    for r in (
+                        self._conn.execute(
+                            f"SELECT id FROM runs WHERE id IN ({','.join('?' for _ in run_ids)})",
+                            tuple(run_ids),
+                        ).fetchall()
+                        if run_ids
+                        else []
+                    )
+                }
+                valid_replays = {
+                    str(r["id"])
+                    for r in (
+                        self._conn.execute(
+                            f"SELECT id FROM replays WHERE id IN ({','.join('?' for _ in replay_ids)})",
+                            tuple(replay_ids),
+                        ).fetchall()
+                        if replay_ids
+                        else []
+                    )
+                }
+                existing_source_keys: set[str] = set()
+                if source_keys:
+                    for i in range(0, len(source_keys), 500):
+                        chunk = source_keys[i : i + 500]
+                        rows = self._conn.execute(
+                            f"SELECT source_key FROM meta_games WHERE project_id = ? AND source_key IN ({','.join('?' for _ in chunk)})",
+                            (project_id, *chunk),
+                        ).fetchall()
+                        existing_source_keys.update(str(r["source_key"]) for r in rows)
+
+                seen_manifests: dict[str, int] = {}
+                gp_card_rows: list[tuple[Any, ...]] = []
+                play_rows: list[tuple[Any, ...]] = []
+
+                for g in games:
+                    if not isinstance(g, dict):
+                        continue
+                    players = [p for p in (g.get("players") or []) if isinstance(p, dict)]
+                    if len(players) < 2:
+                        continue
+                    sk = str(g["source_key"]) if g.get("source_key") else None
+                    if sk and sk in existing_source_keys:
+                        duplicates += 1
+                        continue
+                    if sk:
+                        existing_source_keys.add(sk)
+
+                    mhash = str(
+                        g.get("manifest_hash")
+                        if g.get("manifest_hash") is not None
+                        else default_manifest_hash
+                    )
+                    num_lanes = max(1, int(g.get("num_lanes") or 4))
+                    seen_manifests[mhash] = max(seen_manifests.get(mhash, num_lanes), num_lanes)
+
+                    num_players = max(len(players), int(g.get("num_players") or len(players)))
+                    mode = str(g.get("mode") or ("multiplayer" if num_players > 2 else "1v1"))
+                    played_at = int(g.get("played_at") or ts_now)
+                    day_bucket = played_at // 86_400_000
+                    mid = str(g.get("match_id") or default_match_id or "")
+                    rid = str(g.get("run_id") or default_run_id or "")
+                    rpl = str(g.get("replay_id") or "")
+                    eff_mid = mid if mid in valid_matches else None
+                    eff_rid = rid if rid in valid_runs else None
+                    eff_rpl = rpl if rpl in valid_replays else None
+                    eff_scale = str(g.get("value_scale") or value_scale or "prob")
+
+                    total_actions = int(
+                        g.get("total_actions")
+                        or sum(len(p.get("plays") or []) for p in players)
+                    )
+                    dur = self._clean_opt_float(g.get("duration_sec"))
+
+                    cur = self._conn.execute(
+                        """
+                        INSERT INTO meta_games (
+                            project_id, source_key, source, mode, match_id, run_id, replay_id,
+                            manifest_hash, num_players, num_lanes, rounds, total_actions,
+                            duration_sec, critic_model, critic_perspective, played_at, day_bucket
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            project_id,
+                            sk,
+                            str(g.get("source") or default_source or "league"),
+                            mode,
+                            eff_mid,
+                            eff_rid,
+                            eff_rpl,
+                            mhash,
+                            num_players,
+                            num_lanes,
+                            int(g.get("rounds") or 0),
+                            total_actions,
+                            dur,
+                            str(g["critic_model"]) if g.get("critic_model") else None,
+                            str(g["critic_perspective"]) if g.get("critic_perspective") else None,
+                            played_at,
+                            day_bucket,
+                        ),
+                    )
+                    game_id = int(cur.lastrowid)
+                    inserted += 1
+
+                    for idx, p in enumerate(players):
+                        seat = int(p.get("seat") if p.get("seat") is not None else idx)
+                        rank = int(p.get("rank") if p.get("rank") is not None else (1 if p.get("won") else 2))
+                        outcome_raw = self._clean_opt_float(p.get("outcome_score"))
+                        if outcome_raw is None:
+                            if p.get("won") is True:
+                                outcome_score = 1.0
+                            elif p.get("won") is False:
+                                outcome_score = 0.0
+                            else:
+                                denom = max(1, num_players - 1)
+                                outcome_score = max(0.0, min(1.0, (num_players - rank) / denom))
+                        else:
+                            outcome_score = max(0.0, min(1.0, outcome_raw))
+
+                        rating = self._clean_opt_float(p.get("rating"))
+                        gp_cur = self._conn.execute(
+                            """
+                            INSERT INTO meta_game_players (
+                                game_id, seat, player_key, actor_type, rating, rating_system,
+                                tier, deck_name, deck_hash, rank, outcome_score
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                game_id,
+                                seat,
+                                str(p.get("player_key") or p.get("agent") or f"seat_{seat}"),
+                                str(p.get("actor_type") or "ai"),
+                                rating,
+                                str(p["rating_system"]) if p.get("rating_system") else None,
+                                str(p["tier"]) if p.get("tier") else None,
+                                str(p["deck_name"]) if p.get("deck_name") else None,
+                                str(p["deck_hash"]) if p.get("deck_hash") else None,
+                                rank,
+                                outcome_score,
+                            ),
+                        )
+                        gp_id = int(gp_cur.lastrowid)
+
+                        deck_counts = self._coerce_card_counts(p.get("deck"))
+                        oh_counts = self._coerce_card_counts(p.get("opening_hand"))
+                        mo_counts = self._coerce_card_counts(p.get("mulligan_offered"))
+                        mk_counts = self._coerce_card_counts(p.get("mulligan_kept"))
+                        drawn_counts = self._coerce_card_counts(p.get("drawn"))
+
+                        draw_wpa_raw = p.get("draw_wpas") if isinstance(p.get("draw_wpas"), dict) else {}
+                        draw_wpa_stats: dict[str, tuple[float, int]] = {}
+                        for ck, val in draw_wpa_raw.items():
+                            ckey = str(ck).strip()
+                            vals = val if isinstance(val, (list, tuple)) else [val]
+                            clean_vals = [
+                                x for x in (self._clean_opt_float(v) for v in vals) if x is not None
+                            ]
+                            if clean_vals:
+                                draw_wpa_stats[ckey] = (sum(clean_vals), len(clean_vals))
+
+                        play_stats: dict[str, dict[str, Any]] = {}
+                        for play in p.get("plays") or []:
+                            if not isinstance(play, dict):
+                                continue
+                            ckey = str(
+                                play.get("card")
+                                or play.get("card_key")
+                                or play.get("card_name")
+                                or ""
+                            ).strip()
+                            if not ckey or ckey not in card_map:
+                                continue
+                            cid = card_map[ckey]
+                            turn = int(play.get("turn") or 0)
+                            lane_raw = play.get("lane")
+                            lane = int(lane_raw) if lane_raw is not None else None
+                            lane_ctx = str(play["lane_context"]) if play.get("lane_context") else None
+
+                            if play.get("win_prob_before") is not None or play.get("win_prob_after") is not None:
+                                wp_b = self._normalize_win_prob(
+                                    play.get("win_prob_before"),
+                                    value_scale=eff_scale,
+                                    is_raw_value=False,
+                                )
+                                wp_a = self._normalize_win_prob(
+                                    play.get("win_prob_after"),
+                                    value_scale=eff_scale,
+                                    is_raw_value=False,
+                                )
+                            else:
+                                wp_b = self._normalize_win_prob(
+                                    play.get("value_before"),
+                                    value_scale=eff_scale,
+                                    is_raw_value=True,
+                                )
+                                wp_a = self._normalize_win_prob(
+                                    play.get("value_after"),
+                                    value_scale=eff_scale,
+                                    is_raw_value=True,
+                                )
+
+                            play_rows.append(
+                                (gp_id, cid, turn, lane, lane_ctx, wp_b, wp_a)
+                            )
+                            total_plays += 1
+
+                            st = play_stats.setdefault(
+                                ckey,
+                                {
+                                    "count": 0,
+                                    "first_turn": None,
+                                    "lane_mask": 0,
+                                    "wpa_sum": 0.0,
+                                    "wpa_count": 0,
+                                },
+                            )
+                            st["count"] += 1
+                            if st["first_turn"] is None or turn < st["first_turn"]:
+                                st["first_turn"] = turn
+                            if lane is not None and 0 <= lane < 62:
+                                st["lane_mask"] |= 1 << lane
+                            if wp_b is not None and wp_a is not None:
+                                st["wpa_sum"] += wp_a - wp_b
+                                st["wpa_count"] += 1
+
+                        player_cards = (
+                            set(deck_counts.keys())
+                            | set(oh_counts.keys())
+                            | set(mo_counts.keys())
+                            | set(mk_counts.keys())
+                            | set(drawn_counts.keys())
+                            | set(play_stats.keys())
+                        )
+                        for ckey in player_cards:
+                            cid = card_map.get(ckey)
+                            if cid is None:
+                                continue
+                            pst = play_stats.get(ckey)
+                            p_count = pst["count"] if pst else 0
+                            d_count = max(
+                                drawn_counts.get(ckey, 0),
+                                oh_counts.get(ckey, 0),
+                                p_count,
+                            )
+                            copies = max(deck_counts.get(ckey, 0), d_count, 1)
+                            d_wpa = draw_wpa_stats.get(ckey)
+                            gp_card_rows.append(
+                                (
+                                    gp_id,
+                                    cid,
+                                    copies,
+                                    1 if oh_counts.get(ckey, 0) > 0 else 0,
+                                    1 if mo_counts.get(ckey, 0) > 0 else 0,
+                                    1 if mk_counts.get(ckey, 0) > 0 else 0,
+                                    d_count,
+                                    p_count,
+                                    pst["first_turn"] if pst else None,
+                                    pst["lane_mask"] if pst else 0,
+                                    pst["wpa_sum"] if (pst and pst["wpa_count"] > 0) else None,
+                                    pst["wpa_count"] if pst else 0,
+                                    d_wpa[0] if d_wpa else None,
+                                    d_wpa[1] if d_wpa else 0,
+                                )
+                            )
+
+                if gp_card_rows:
+                    self._conn.executemany(
+                        """
+                        INSERT INTO meta_game_cards (
+                            game_player_id, card_id, copies_in_deck, in_opening_hand,
+                            mulligan_offered, mulligan_kept, drawn_count, played_count,
+                            first_turn_played, lane_mask,
+                            critic_play_wpa_sum, critic_play_wpa_count,
+                            critic_draw_wpa_sum, critic_draw_wpa_count
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        gp_card_rows,
+                    )
+                if play_rows:
+                    self._conn.executemany(
+                        """
+                        INSERT INTO meta_card_plays (
+                            game_player_id, card_id, turn, lane, lane_context, win_prob_before, win_prob_after
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        play_rows,
+                    )
+                for mhash, lanes in seen_manifests.items():
+                    self._upsert_manifest_locked(
+                        project_id, mhash, num_lanes=lanes, ts=ts_now
+                    )
+                if inserted > 0:
+                    watermark = self._bump_meta_watermark_locked(project_id)
+                else:
+                    row = self._conn.execute(
+                        "SELECT version FROM meta_watermarks WHERE project_id = ?",
+                        (project_id,),
+                    ).fetchone()
+                    watermark = int(row["version"]) if row else 0
+
+        return {
+            "project": proj["name"],
+            "project_id": project_id,
+            "inserted": inserted,
+            "duplicates": duplicates,
+            "total_plays": total_plays,
+            "watermark": watermark,
+        }
+
+    def prune_meta_card_plays(
+        self,
+        *,
+        project: str | None = None,
+        older_than_days: int = 90,
+        before_ms: int | None = None,
+    ) -> dict[str, Any]:
+        cutoff_ms = (
+            int(before_ms)
+            if before_ms is not None
+            else now_ms() - max(0, int(older_than_days)) * 86_400_000
+        )
+        with self._lock:
+            proj_ids: list[str]
+            if project:
+                pid = self.resolve_project_id(project)
+                proj_ids = [pid] if pid else []
+            else:
+                rows = self._conn.execute(
+                    "SELECT DISTINCT project_id FROM meta_games"
+                ).fetchall()
+                proj_ids = [str(r["project_id"]) for r in rows]
+
+            if not proj_ids:
+                return {"deleted_plays": 0, "cutoff_ms": cutoff_ms, "projects": []}
+
+            placeholders = ",".join("?" for _ in proj_ids)
+            with self._conn:
+                cur = self._conn.execute(
+                    f"""
+                    DELETE FROM meta_card_plays
+                    WHERE game_player_id IN (
+                        SELECT gp.id
+                        FROM meta_game_players gp
+                        JOIN meta_games g ON g.id = gp.game_id
+                        WHERE g.project_id IN ({placeholders})
+                          AND g.played_at < ?
+                    )
+                    """,
+                    (*proj_ids, cutoff_ms),
+                )
+                deleted = int(cur.rowcount or 0)
+                if deleted > 0:
+                    for pid in proj_ids:
+                        self._bump_meta_watermark_locked(pid)
+        return {
+            "deleted_plays": deleted,
+            "cutoff_ms": cutoff_ms,
+            "projects": proj_ids,
+        }

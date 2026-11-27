@@ -9,9 +9,11 @@ import sys
 import uvicorn
 
 from .sdk.importer import import_league_db
+from .sdk.meta import import_meta_games_ndjson
 from .sdk.run import sync as sync_spool
 from .server.app import create_app
 from .server.config import ServerConfig
+from .server.db import Database
 
 
 def _cmd_server(args: argparse.Namespace) -> int:
@@ -80,6 +82,35 @@ def _cmd_import_league(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_import_meta_games(args: argparse.Namespace) -> int:
+    res = import_meta_games_ndjson(
+        args.ndjson_path,
+        project=args.project,
+        source=args.source,
+        manifest_hash=args.manifest_hash or "",
+        value_scale=args.value_scale,
+        chunk_size=args.chunk_size,
+        server_url=args.url,
+        api_token=args.token,
+    )
+    print(json.dumps(res, indent=2))
+    return 0
+
+
+def _cmd_prune_meta_plays(args: argparse.Namespace) -> int:
+    cfg = ServerConfig.from_env(data_dir=args.data_dir)
+    db = Database(cfg.db_path)
+    try:
+        res = db.prune_meta_card_plays(
+            project=args.project,
+            older_than_days=args.older_than_days,
+        )
+    finally:
+        db.close()
+    print(json.dumps(res, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="traininglog",
@@ -117,6 +148,29 @@ def main(argv: list[str] | None = None) -> int:
     p_imp.add_argument("--url", default="http://127.0.0.1:8765", help="Server base URL")
     p_imp.add_argument("--token", default=None, help="Optional API bearer token")
     p_imp.set_defaults(func=_cmd_import_league)
+
+    p_meta_imp = sub.add_parser(
+        "import-meta-games",
+        help="Import per-game meta telemetry from an .ndjson or .ndjson.gz file",
+    )
+    p_meta_imp.add_argument("ndjson_path", help="Path to .ndjson or .ndjson.gz file")
+    p_meta_imp.add_argument("--project", default="cardgame-ppo", help="Target TrainingLog project")
+    p_meta_imp.add_argument("--source", default=None, help="Override game source (league, player_ranked, etc.)")
+    p_meta_imp.add_argument("--manifest-hash", default=None, help="Fallback manifest_hash")
+    p_meta_imp.add_argument("--value-scale", default="prob", choices=["prob", "neg1_pos1"])
+    p_meta_imp.add_argument("--chunk-size", type=int, default=500)
+    p_meta_imp.add_argument("--url", default="http://127.0.0.1:8765", help="Server base URL")
+    p_meta_imp.add_argument("--token", default=None, help="Optional API bearer token")
+    p_meta_imp.set_defaults(func=_cmd_import_meta_games)
+
+    p_prune = sub.add_parser(
+        "prune-meta-plays",
+        help="Prune old raw meta_card_plays rows while preserving meta_game_cards aggregates",
+    )
+    p_prune.add_argument("--data-dir", default=None, help="Storage directory (default: ./data)")
+    p_prune.add_argument("--project", default=None, help="Project name or ID (default: all)")
+    p_prune.add_argument("--older-than-days", type=int, default=90)
+    p_prune.set_defaults(func=_cmd_prune_meta_plays)
 
     args = parser.parse_args(argv)
     return int(args.func(args))
